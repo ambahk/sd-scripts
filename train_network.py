@@ -190,18 +190,18 @@ def train(args):
             module, weights_sd = network_module.create_network_from_weights(
                 multiplier, weight_path, vae, text_encoder, unet, for_inference=True
             )
-            module.merge_to(text_encoder, unet, weights_sd, weight_dtype, accelerator.device if args.lowram else "cpu")
+            module.merge_to(text_encoder, unet, weights_sd, weight_dtype, train_util.prefer_device())
 
         print(f"all weights merged: {', '.join(args.base_weights)}")
 
     # 学習を準備する
     if cache_latents:
-        vae.to(accelerator.device, dtype=weight_dtype)
+        vae.to(train_util.prefer_device(), dtype=weight_dtype)
         vae.requires_grad_(False)
         vae.eval()
         with torch.no_grad():
             train_dataset_group.cache_latents(vae, args.vae_batch_size, args.cache_latents_to_disk, accelerator.is_main_process)
-        vae.to("cpu")
+        vae.to(train_util.prefer_device())
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -316,9 +316,9 @@ def train(args):
     text_encoder, unet, network = train_util.transform_if_model_is_DDP(text_encoder, unet, network)
 
     unet.requires_grad_(False)
-    unet.to(accelerator.device, dtype=weight_dtype)
+    unet.to(train_util.prefer_device(), dtype=weight_dtype)
     text_encoder.requires_grad_(False)
-    text_encoder.to(accelerator.device)
+    text_encoder.to(train_util.prefer_device())
     if args.gradient_checkpointing:  # according to TI example in Diffusers, train is required
         unet.train()
         text_encoder.train()
@@ -334,7 +334,7 @@ def train(args):
     if not cache_latents:  # キャッシュしない場合はVAEを使うのでVAEを準備する
         vae.requires_grad_(False)
         vae.eval()
-        vae.to(accelerator.device, dtype=weight_dtype)
+        vae.to(train_util.prefer_device(), dtype=weight_dtype)
 
     # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
     if args.full_fp16:
@@ -569,7 +569,7 @@ def train(args):
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
     )
-    prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
+    prepare_scheduler_for_custom_training(noise_scheduler, train_util.prefer_device())
 
     if accelerator.is_main_process:
         accelerator.init_trackers("network_train" if args.log_tracker_name is None else args.log_tracker_name)
@@ -621,10 +621,10 @@ def train(args):
 
                 with torch.no_grad():
                     if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device)
+                        latents = batch["latents"].to(train_util.prefer_device())
                     else:
                         # latentに変換
-                        latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
+                        latents = vae.encode(batch["images"].to(train_util.prefer_device())).latent_dist.sample()
                     latents = latents * 0.18215
                 b_size = latents.shape[0]
 
@@ -635,12 +635,12 @@ def train(args):
                             tokenizer,
                             text_encoder,
                             batch["captions"],
-                            accelerator.device,
+                            train_util.prefer_device(),
                             args.max_token_length // 75 if args.max_token_length else 1,
                             clip_skip=args.clip_skip,
                         )
                     else:
-                        input_ids = batch["input_ids"].to(accelerator.device)
+                        input_ids = batch["input_ids"].to(train_util.prefer_device())
                         encoder_hidden_states = train_util.get_hidden_states(args, input_ids, tokenizer, text_encoder, weight_dtype)
 
                 # Sample noise that we'll add to the latents
@@ -671,6 +671,7 @@ def train(args):
                 loss = loss.mean([1, 2, 3])
 
                 loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                loss_weights = loss_weights.to(loss.device)
                 loss = loss * loss_weights
 
                 if args.min_snr_gamma:
@@ -691,7 +692,7 @@ def train(args):
 
             if args.scale_weight_norms:
                 keys_scaled, mean_norm, maximum_norm = network.apply_max_norm_regularization(
-                    args.scale_weight_norms, accelerator.device
+                    args.scale_weight_norms, train_util.prefer_device()
                 )
                 max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
             else:
@@ -703,7 +704,7 @@ def train(args):
                 global_step += 1
 
                 train_util.sample_images(
-                    accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
+                    accelerator, args, None, global_step, train_util.prefer_device(), vae, tokenizer, text_encoder, unet
                 )
 
                 # 指定ステップごとにモデルを保存
@@ -763,7 +764,7 @@ def train(args):
                 if args.save_state:
                     train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-        train_util.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+        train_util.sample_images(accelerator, args, epoch + 1, global_step, train_util.prefer_device(), vae, tokenizer, text_encoder, unet)
 
         # end of epoch
 

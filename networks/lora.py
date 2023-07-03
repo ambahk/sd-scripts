@@ -52,11 +52,11 @@ class LoRAModule(torch.nn.Module):
             kernel_size = org_module.kernel_size
             stride = org_module.stride
             padding = org_module.padding
-            self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
-            self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
+            self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False, device=prefer_device())
+            self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False, device=prefer_device())
         else:
-            self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False)
-            self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False)
+            self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False, device=prefer_device())
+            self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False, device=prefer_device())
 
         if type(alpha) == torch.Tensor:
             alpha = alpha.detach().float().numpy()  # without casting, bf16 causes error
@@ -87,6 +87,8 @@ class LoRAModule(torch.nn.Module):
             if torch.rand(1) < self.module_dropout:
                 return org_forwarded
 
+        ## org_forward was able to handle auto .to(device) for the parameters
+        self.lora_down.weight = torch.nn.Parameter(self.lora_down.weight.to(prefer_device()))
         lx = self.lora_down(x)
 
         # normal dropout
@@ -108,6 +110,7 @@ class LoRAModule(torch.nn.Module):
         else:
             scale = self.scale
 
+        self.lora_up.weight = torch.nn.Parameter(self.lora_up.weight.to(prefer_device()))
         lx = self.lora_up(lx)
 
         return org_forwarded + lx * self.multiplier * scale
@@ -188,8 +191,8 @@ class LoRAInfModule(LoRAModule):
             multiplier = self.multiplier
 
         # get up/down weight from module
-        up_weight = self.lora_up.weight.to(torch.float)
-        down_weight = self.lora_down.weight.to(torch.float)
+        up_weight = self.lora_up.weight.to(device=prefer_device(), dtype=torch.float)
+        down_weight = self.lora_down.weight.to(device=prefer_device(), dtype=torch.float)
 
         # pre-calculated weight
         if len(down_weight.size()) == 2:
@@ -680,7 +683,7 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
 
             weights_sd = load_file(file)
         else:
-            weights_sd = torch.load(file, map_location="cpu")
+            weights_sd = torch.load(file, map_location=prefer_device())
 
     # get dim/alpha mapping
     modules_dim = {}
@@ -879,7 +882,7 @@ class LoRANetwork(torch.nn.Module):
 
             weights_sd = load_file(file)
         else:
-            weights_sd = torch.load(file, map_location="cpu")
+            weights_sd = torch.load(file, map_location=prefer_device())
 
         info = self.load_state_dict(weights_sd, False)
         return info
@@ -1073,6 +1076,8 @@ class LoRANetwork(torch.nn.Module):
         dtype = ref_weight.dtype
         device = ref_weight.device
 
+        print("set_current_generation device:" + device)
+
         def resize_add(mh, mw):
             # print(mh, mw, mh * mw)
             m = torch.nn.functional.interpolate(mask, (mh, mw), mode="bilinear")  # doesn't work in bf16
@@ -1169,3 +1174,6 @@ class LoRANetwork(torch.nn.Module):
             norms.append(scalednorm.item())
 
         return keys_scaled, sum(norms) / len(norms), max(norms)
+
+def prefer_device(device=None):
+    return device if device != None else "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"

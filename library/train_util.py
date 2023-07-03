@@ -811,7 +811,7 @@ class BaseDataset(torch.utils.data.Dataset):
             img_tensors = torch.stack(images, dim=0)
             img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
 
-            latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
+            latents = vae.encode(img_tensors).latent_dist.sample().to(prefer_device())
 
             for info, latent in zip(batch, latents):
                 if cache_to_disk:
@@ -821,7 +821,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
             if subset.flip_aug:
                 img_tensors = torch.flip(img_tensors, dims=[3])
-                latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
+                latents = vae.encode(img_tensors).latent_dist.sample().to(prefer_device())
                 for info, latent in zip(batch, latents):
                     if cache_to_disk:
                         np.savez(info.latents_npz_flipped, latent.float().numpy())
@@ -3085,6 +3085,9 @@ def prepare_accelerator(args: argparse.Namespace):
             return accelerator.unwrap_model(model, True)
         return accelerator.unwrap_model(model)
 
+    print ("accelerator.device:")
+    print (accelerator.device)
+
     return accelerator, unwrap_model
 
 
@@ -3106,7 +3109,8 @@ def prepare_dtype(args: argparse.Namespace):
     return weight_dtype, save_dtype
 
 
-def _load_target_model(args: argparse.Namespace, weight_dtype, device="cpu"):
+def _load_target_model(args: argparse.Namespace, weight_dtype, device=None):
+    device = prefer_device(device)
     name_or_path = args.pretrained_model_name_or_path
     name_or_path = os.readlink(name_or_path) if os.path.islink(name_or_path) else name_or_path
     load_stable_diffusion_format = os.path.isfile(name_or_path)  # determine SD or Diffusers
@@ -3147,7 +3151,7 @@ def load_target_model(args, weight_dtype, accelerator):
             print(f"loading model for process {accelerator.state.local_process_index}/{accelerator.state.num_processes}")
 
             text_encoder, vae, unet, load_stable_diffusion_format = _load_target_model(
-                args, weight_dtype, accelerator.device if args.lowram else "cpu"
+                args, weight_dtype, accelerator.device if args.lowram else prefer_device()
             )
 
             # work on low-ram device
@@ -3732,3 +3736,6 @@ class collater_class:
         dataset.set_current_epoch(self.current_epoch.value)
         dataset.set_current_step(self.current_step.value)
         return examples[0]
+
+def prefer_device(device=None):
+    return device if device != None else "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"

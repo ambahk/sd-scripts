@@ -818,7 +818,8 @@ def is_safetensors(path):
     return os.path.splitext(path)[1].lower() == ".safetensors"
 
 
-def load_checkpoint_with_text_encoder_conversion(ckpt_path, device="cpu"):
+def load_checkpoint_with_text_encoder_conversion(ckpt_path, device=None):
+    device = prefer_device(device)
     # text encoderの格納形式が違うモデルに対応する ('text_model'がない)
     TEXT_ENCODER_KEY_REPLACEMENTS = [
         ("cond_stage_model.transformer.embeddings.", "cond_stage_model.transformer.text_model.embeddings."),
@@ -852,7 +853,8 @@ def load_checkpoint_with_text_encoder_conversion(ckpt_path, device="cpu"):
 
 
 # TODO dtype指定の動作が怪しいので確認する text_encoderを指定形式で作れるか未確認
-def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dtype=None, unet_use_linear_projection_in_v2=False):
+def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device=None, dtype=None, unet_use_linear_projection_in_v2=False):
+    device = prefer_device(device)
     _, state_dict = load_checkpoint_with_text_encoder_conversion(ckpt_path, device)
 
     # Convert the UNet2DConditionModel model.
@@ -893,7 +895,7 @@ def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dt
             model_type="clip_text_model",
             projection_dim=512,
             torch_dtype="float32",
-            transformers_version="4.25.0.dev0",
+            transformers_version="4.30.2",
         )
         text_model = CLIPTextModel._from_config(cfg)
         info = text_model.load_state_dict(converted_text_encoder_checkpoint)
@@ -1156,6 +1158,8 @@ def make_bucket_resolutions(max_reso, min_size=256, max_size=1024, divisible=64)
     resos.sort()
     return resos
 
+def prefer_device(device=None):
+    return device if device != None else "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 if __name__ == "__main__":
     resos = make_bucket_resolutions((512, 768))
